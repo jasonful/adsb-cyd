@@ -54,6 +54,7 @@ struct ColorPalette {
     uint16_t fade_dim;
     uint16_t fade_mil_dim;
     uint16_t fade_emg_dim;
+    uint16_t speed_altitude;
 };
 
 static const ColorPalette PALETTE_GREEN = {
@@ -69,11 +70,12 @@ static const ColorPalette PALETTE_GREEN = {
     c565(0, 180, 0),     // status
     c565(0, 150, 0),     // hdr
     c565(0, 20, 0),      // status_bg
-    c565(0, 255, 0),     // fade_bright
-    c565(0, 140, 0),     // fade_med
-    c565(0, 70, 0),      // fade_dim
-    c565(120, 30, 30),   // fade_mil_dim
-    c565(120, 90, 0),    // fade_emg_dim
+    c565(255,255,255), //c565(0, 255, 0),     // fade_bright
+    c565(255,255,255), //c565(0, 140, 0),     // fade_med
+    c565(255,255,255), //c565(0, 70, 0),      // fade_dim
+    c565(255, 60, 60),   //c565(120, 30, 30),   // fade_mil_dim
+    c565(255, 200, 0), //c565(120, 90, 0),    // fade_emg_dim
+    c565(128, 128, 128),        // speed_altitude
 };
 
 static const ColorPalette PALETTE_NIGHT = {
@@ -89,11 +91,12 @@ static const ColorPalette PALETTE_NIGHT = {
     c565(180, 70, 0),    // status
     c565(150, 60, 0),    // hdr
     c565(20, 5, 0),      // status_bg
-    c565(255, 140, 0),   // fade_bright
-    c565(140, 60, 0),    // fade_med
-    c565(70, 25, 0),     // fade_dim
-    c565(120, 30, 30),   // fade_mil_dim
-    c565(120, 20, 20),   // fade_emg_dim
+    c565(255,255,255), //c565(255, 140, 0),   // fade_bright
+    c565(255,255,255), //c565(140, 60, 0),    // fade_med
+    c565(255,255,255), //c565(70, 25, 0),     // fade_dim
+    c565(255, 60, 60),//c565(120, 30, 30),   // fade_mil_dim
+    c565(255, 50, 50),   //c565(120, 20, 20),   // fade_emg_dim
+    c565(128, 128, 128),        // speed_altitude
 };
 
 static const ColorPalette *pal = &PALETTE_GREEN;
@@ -155,7 +158,7 @@ static uint32_t last_cycle_time = 0;
 
 enum ArrSort { SORT_DIST, SORT_ALT, SORT_SPEED };
 static ArrSort arr_sort = SORT_DIST;
-static const char *SORT_LABELS[] = {"DST", "ALT", "SPD"};
+static const char *SORT_LABELS[] = {"Dist", "Altd", "Speed"};
 
 // ---- Alert state ----
 
@@ -260,19 +263,70 @@ static uint16_t touchRead16(uint8_t cmd) {
     return val >> 3;
 }
 
-static bool getTouchPoint(int &tx, int &ty) {
+static bool getTouchPoint_orig(int &tx, int &ty) {
     if (digitalRead(XPT2046_IRQ) != LOW) return false;
     uint32_t sumX = 0, sumY = 0;
     for (int i = 0; i < 4; i++) {
         sumX += touchRead16(0xD0);
         sumY += touchRead16(0x90);
     }
+    //Serial.printf("Touch raw: %lu, %lu\n", sumX / 4, sumY / 4);
     tx = map(sumX / 4, TOUCH_X_MIN, TOUCH_X_MAX, 0, 319);
     ty = map(sumY / 4, TOUCH_Y_MIN, TOUCH_Y_MAX, 0, 239);
     tx = constrain(tx, 0, 319);
     ty = constrain(ty, 0, 239);
+    //Serial.printf("Touch mapped: %d, %d\n", tx, ty);
     return true;
 }
+
+
+
+static bool getTouchPoint(int &tx, int &ty) {
+    if (digitalRead(XPT2046_IRQ) != LOW) 
+        return false;
+
+    const int SAMPLES = 5;
+    int raw_x[SAMPLES];
+    int raw_y[SAMPLES];
+
+    for (int i = 0; i < SAMPLES; i++) {
+        raw_x[i] = touchRead16(0x90);
+        raw_y[i] = touchRead16(0xD0);
+        delayMicroseconds(100);
+    }
+
+    // Simple insertion sort to find median
+    for (int i = 1; i < SAMPLES; i++) {
+        int key_x = raw_x[i];
+        int key_y = raw_y[i];
+        int j = i - 1;
+
+        while (j >= 0 && raw_x[j] > key_x) {
+            raw_x[j + 1] = raw_x[j];
+            j--;
+        }
+        raw_x[j + 1] = key_x;
+
+        j = i - 1;
+        while (j >= 0 && raw_y[j] > key_y) {
+            raw_y[j + 1] = raw_y[j];
+            j--;
+        }
+        raw_y[j + 1] = key_y;
+    }
+
+    // Median is at index 2 for 5 samples
+    int med_x = raw_x[SAMPLES / 2];
+    int med_y = raw_y[SAMPLES / 2];
+
+    // Map and clamp
+    tx = constrain(map(med_x,  TOUCH_X_MIN, TOUCH_X_MAX, 0, 319), 0, 319);
+    ty = constrain(map(med_y,  TOUCH_Y_MIN, TOUCH_Y_MAX, 0, 239), 0, 239);
+    Serial.printf("Touch median raw: (%d, %d)  Translated(%d, %d)\n", med_x, med_y, tx, ty);
+    return true;
+}
+
+
 
 // ---- Brightness ----
 
@@ -462,19 +516,21 @@ static void draw_status_bar(bool force) {
     tft.setTextDatum(TL_DATUM);
 
     // WiFi status
-    const char *net = fetcher_wifi_connected() ? "WiFi" : "---";
+    const char *net = fetcher_wifi_connected() ? "" : "No Wifi";
     tft.drawString(net, 2, 3, 2);
 
     // View + Aircraft count
     char buf[24];
-    const char *vn = "RDR";
-    if (current_view == VIEW_ARRIVALS) vn = "ARR";
-    else if (current_view == VIEW_STATS) vn = "STA";
-    else if (current_view == VIEW_DETAIL) vn = "DTL";
-    else if (current_view == VIEW_LOG) vn = "LOG";
-    else if (current_view == VIEW_SETTINGS) vn = "SET";
-    snprintf(buf, sizeof(buf), "%s %dAC", vn, aircraft_list.count);
-    tft.drawString(buf, 45, 3, 2);
+    const char *vn = "Radar";
+    if (current_view == VIEW_ARRIVALS) vn = "Aircraft";
+    else if (current_view == VIEW_STATS) vn = "Stats";
+    else if (current_view == VIEW_DETAIL) vn = "Detail";
+    else if (current_view == VIEW_LOG) vn = "Log";
+    else if (current_view == VIEW_SETTINGS) vn = "Settings";
+    //snprintf(buf, sizeof(buf), "%s %dAC", vn, aircraft_list.count);
+    snprintf(buf, sizeof(buf), "%s", vn);
+    //tft.drawString(buf, 45, 3, 2);
+    tft.drawString(buf, 0, 3, 2);
 
     // Filter indicator (if active)
     int filt = filter_get_active();
@@ -520,7 +576,7 @@ static void draw_status_bar(bool force) {
     // Free heap (tiny font center)
     snprintf(buf, sizeof(buf), "%luK", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString(buf, 160, 14, 1);
+    //tft.drawString(buf, 160, 14, 1);
 }
 
 // ---- Loading animation ----
@@ -595,6 +651,7 @@ static void draw_loading() {
 // ---- Radar view ----
 
 static void draw_radar() {
+    bool draw_sweep = false;
     if (radar_needs_full_redraw) {
         tft.fillRect(0, RADAR_Y, LCD_H_RES, RADAR_H, pal->bg);
         radar_needs_full_redraw = false;
@@ -603,12 +660,14 @@ static void draw_radar() {
         prev_sweep_angle = -1;
     }
 
-    // Erase old sweep
-    if (prev_sweep_angle >= 0) {
-        float prad = prev_sweep_angle * M_PI / 180.0f;
-        tft.drawLine(RADAR_CX, RADAR_CY,
-            RADAR_CX + (int)(RADAR_R * sinf(prad)),
-            RADAR_CY - (int)(RADAR_R * cosf(prad)), pal->bg);
+    if (draw_sweep) {
+        // Erase old sweep
+        if (prev_sweep_angle >= 0) {
+            float prad = prev_sweep_angle * M_PI / 180.0f;
+            tft.drawLine(RADAR_CX, RADAR_CY,
+                RADAR_CX + (int)(RADAR_R * sinf(prad)),
+                RADAR_CY - (int)(RADAR_R * cosf(prad)), pal->bg);
+        }
     }
 
     // Erase old trails
@@ -623,7 +682,7 @@ static void draw_radar() {
         BlipState &b = prev_blips[i];
         tft.fillCircle(b.x, b.y, b.r, pal->bg);
         if (b.has_heading) tft.drawLine(b.x, b.y, b.hx, b.hy, pal->bg);
-        if (b.has_label) tft.fillRect(b.x + 4, b.y - 12, 56, 18, pal->bg);
+        if (b.has_label) tft.fillRect(b.x + 4, b.y - 12, 56, /*18*/24, pal->bg);
     }
 
     // Redraw static: rings + crosshair
@@ -637,17 +696,19 @@ static void draw_radar() {
     // Compass rose: N/S/E/W at ring edges
     tft.setTextColor(pal->ring, pal->bg);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString("N", RADAR_CX, RADAR_CY - RADAR_R + 6, 1);
+    tft.drawString("N", RADAR_CX, RADAR_CY - RADAR_R + 18, 1);
     tft.drawString("S", RADAR_CX, RADAR_CY + RADAR_R - 6, 1);
     tft.drawString("E", RADAR_CX + RADAR_R - 6, RADAR_CY, 1);
     tft.drawString("W", RADAR_CX - RADAR_R + 6, RADAR_CY, 1);
 
-    // Sweep line
-    float rad = sweep_angle * M_PI / 180.0f;
-    int sx = RADAR_CX + (int)(RADAR_R * sinf(rad));
-    int sy = RADAR_CY - (int)(RADAR_R * cosf(rad));
-    tft.drawLine(RADAR_CX, RADAR_CY, sx, sy, pal->sweep);
-    prev_sweep_angle = sweep_angle;
+    if (draw_sweep) {
+        // Sweep line
+        float rad = sweep_angle * M_PI / 180.0f;
+        int sx = RADAR_CX + (int)(RADAR_R * sinf(rad));
+        int sy = RADAR_CY - (int)(RADAR_R * cosf(rad));
+        tft.drawLine(RADAR_CX, RADAR_CY, sx, sy, pal->sweep);
+        prev_sweep_angle = sweep_angle;
+    }
 
     // Home dot
     tft.fillCircle(RADAR_CX, RADAR_CY, 2, pal->text);
@@ -724,6 +785,7 @@ static void draw_radar() {
             }
 
             // Labels
+            behind = 0; // Do no fade
             if (behind < 180) {
                 tft.setTextColor(fade_color, pal->bg);
                 tft.setTextDatum(BL_DATUM);
@@ -739,7 +801,8 @@ static void draw_radar() {
                         info[0] = '\0';
                     if (info[0]) {
                         tft.setTextDatum(TL_DATUM);
-                        tft.drawString(info, px + 4, py + 2, 1);
+                        tft.setTextColor(pal->speed_altitude, pal->bg);
+                        tft.drawString(info, px + 4, py, 1);
                     }
                 }
                 b.has_label = true;
@@ -786,11 +849,13 @@ static void draw_arrivals() {
     tft.drawString("SPD", 222, y, 2);
     tft.drawString("DIST", 278, y, 2);
 
+    #if 0
     // Sort indicator
     tft.setTextDatum(TR_DATUM);
     char sort_buf[8];
     snprintf(sort_buf, sizeof(sort_buf), "[%s]", SORT_LABELS[arr_sort]);
     tft.drawString(sort_buf, 316, y, 1);
+    #endif
 
     y += 17;
     tft.drawLine(0, y, LCD_H_RES, y, pal->hdr);
@@ -896,10 +961,10 @@ static void draw_arrivals() {
     tft.drawFastVLine(TOUCH_RIGHT_MIN, ARR_BTN_Y, ARR_BTN_H, pal->hdr);
     tft.setTextColor(pal->status, pal->status_bg);
     tft.setTextDatum(MC_DATUM);
-    snprintf(buf, sizeof(buf), "SORT %s", SORT_LABELS[arr_sort]);
+    snprintf(buf, sizeof(buf), "Sorted by %s", SORT_LABELS[arr_sort]);
     tft.drawString(buf, TOUCH_LEFT_MAX / 2, ARR_BTN_Y + ARR_BTN_H / 2, 2);
     tft.drawString("TAP ROW", LCD_H_RES / 2, ARR_BTN_Y + ARR_BTN_H / 2, 1);
-    snprintf(buf, sizeof(buf), "RNG %d", (int)RANGES[range_idx]);
+    snprintf(buf, sizeof(buf), "Range %d", (int)RANGES[range_idx]);
     tft.drawString(buf, (TOUCH_RIGHT_MIN + LCD_H_RES) / 2, ARR_BTN_Y + ARR_BTN_H / 2, 2);
 }
 
@@ -1080,16 +1145,16 @@ static void draw_detail() {
     y += 12;
 
     snprintf(buf, sizeof(buf), "%d", a.heading);
-    label_val(col1, col1 + 24, "HD", buf);
+    label_val(col1, col1 + 24, "HEAD", buf);
     snprintf(buf, sizeof(buf), "%d fpm", a.vert_rate);
     label_val(col3, col3 + 24, "VS", buf);
     y += 12;
 
     snprintf(buf, sizeof(buf), "%04d", a.squawk);
-    label_val(col1, col1 + 24, "SQ", buf);
+    label_val(col1, col1 + 24, "SQAK", buf);
     if (a.mach > 0) snprintf(buf, sizeof(buf), "M%.2f", a.mach);
     else strlcpy(buf, "---", sizeof(buf));
-    label_val(col3, col3 + 24, "MA", buf);
+    label_val(col3, col3 + 24, "MACH", buf);
     y += 12;
 
     snprintf(buf, sizeof(buf), "%d kt", a.ias);
@@ -1566,7 +1631,7 @@ void loop() {
     auto_cycle();
 
     // Redraw at ~15fps
-    if (now - last_draw >= 66) {
+    if (now - last_draw >= /*66*/1000) {
         last_draw = now;
 
         if (current_view == VIEW_LOADING) {
