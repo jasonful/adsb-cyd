@@ -114,7 +114,7 @@ static const ColorPalette *pal = &PALETTE_GREEN;
 // Data is fetched at ADSB_RADIUS_NM, so ranges beyond that would just show empty space
 static const float RANGES[] = {25, 15, 10, 5};
 static const int NUM_RANGES = 4;
-static int range_idx = 0;
+static int range_idx = 3;
 
 // ---- View state ----
 
@@ -263,7 +263,8 @@ static uint16_t touchRead16(uint8_t cmd) {
     return val >> 3;
 }
 
-static bool getTouchPoint_orig(int &tx, int &ty) {
+#if 0
+static bool getTouchPoint(int &tx, int &ty) {
     if (digitalRead(XPT2046_IRQ) != LOW) return false;
     uint32_t sumX = 0, sumY = 0;
     for (int i = 0; i < 4; i++) {
@@ -278,7 +279,7 @@ static bool getTouchPoint_orig(int &tx, int &ty) {
     //Serial.printf("Touch mapped: %d, %d\n", tx, ty);
     return true;
 }
-
+#endif
 
 
 static bool getTouchPoint(int &tx, int &ty) {
@@ -290,6 +291,7 @@ static bool getTouchPoint(int &tx, int &ty) {
     int raw_y[SAMPLES];
 
     for (int i = 0; i < SAMPLES; i++) {
+        // These may seem reversed, but it worked for my CYD.
         raw_x[i] = touchRead16(0x90);
         raw_y[i] = touchRead16(0xD0);
         delayMicroseconds(100);
@@ -322,7 +324,9 @@ static bool getTouchPoint(int &tx, int &ty) {
     // Map and clamp
     tx = constrain(map(med_x,  TOUCH_X_MIN, TOUCH_X_MAX, 0, 319), 0, 319);
     ty = constrain(map(med_y,  TOUCH_Y_MIN, TOUCH_Y_MAX, 0, 239), 0, 239);
+    #if SERIAL_PRINT
     Serial.printf("Touch median raw: (%d, %d)  Translated(%d, %d)\n", med_x, med_y, tx, ty);
+    #endif
     return true;
 }
 
@@ -573,10 +577,12 @@ static void draw_status_bar(bool force) {
         tft.drawString(buf, 260, 3, 2);
     }
 
+    #if 0
     // Free heap (tiny font center)
     snprintf(buf, sizeof(buf), "%luK", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024);
     tft.setTextDatum(MC_DATUM);
-    //tft.drawString(buf, 160, 14, 1);
+    tft.drawString(buf, 160, 14, 1);
+    #endif
 }
 
 // ---- Loading animation ----
@@ -617,35 +623,38 @@ static void draw_loading() {
     uint32_t now = millis();
 
     if (now - last_dot_time > 500) { last_dot_time = now; load_dots = (load_dots + 1) % 4; }
-    const char *dots = load_dots == 1 ? "." : load_dots == 2 ? ".." : load_dots == 3 ? "..." : "   ";
+    const char *dots = load_dots == 1 ? ".  " : load_dots == 2 ? ".. " : load_dots == 3 ? "..." : "   ";
 
     if (!fetcher_wifi_connected()) {
         char msg[20];
-        snprintf(msg, sizeof(msg), "WiFi%-3s", dots);
+        snprintf(msg, sizeof(msg), "Connecting to WiFi%-3s", dots);
         tft.setTextColor(pal->text, pal->bg);
         tft.drawString(msg, cx, ty, 2);
     } else if (fetcher_last_update() == 0) {
         char msg[24];
-        snprintf(msg, sizeof(msg), "Scanning%-3s", dots);
+        snprintf(msg, sizeof(msg), "Looking for aircraft%-3s", dots);
         tft.setTextColor(pal->sweep, pal->bg);
         tft.drawString(msg, cx, ty, 2);
+
+        #if 0
         // Show IP once connected
         const FetcherStats *fs = fetcher_get_stats();
         if (fs->ip_addr[0]) {
             tft.setTextColor(pal->fade_med, pal->bg);
             tft.drawString(fs->ip_addr, cx, ty + 18, 1);
         }
+        #endif
     } else {
         // Brief "found N aircraft" before transitioning
         char msg[32];
-        snprintf(msg, sizeof(msg), "Found %d aircraft", aircraft_list.count);
+        snprintf(msg, sizeof(msg), "   Found %d aircraft   ", aircraft_list.count);
         tft.setTextColor(pal->sweep, pal->bg);
         tft.drawString(msg, cx, ty, 2);
     }
 
     tft.setTextColor(pal->text, pal->bg);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString("ADS-B Radar", cx, cy - r - 20, 4);
+    tft.drawString("Plane Radar", cx, cy - r - 20, 4);
 }
 
 // ---- Radar view ----
@@ -701,6 +710,13 @@ static void draw_radar() {
     tft.drawString("E", RADAR_CX + RADAR_R - 6, RADAR_CY, 1);
     tft.drawString("W", RADAR_CX - RADAR_R + 6, RADAR_CY, 1);
 
+    // Buttons
+    tft.setTextDatum(BL_DATUM);
+    tft.setTextColor(pal->status, pal->status_bg);
+    tft.drawString("Filter", 0, LCD_V_RES, 1);
+    tft.setTextDatum(BR_DATUM);
+    tft.drawString("Range", LCD_H_RES, LCD_V_RES, 1);
+
     if (draw_sweep) {
         // Sweep line
         float rad = sweep_angle * M_PI / 180.0f;
@@ -712,6 +728,16 @@ static void draw_radar() {
 
     // Home dot
     tft.fillCircle(RADAR_CX, RADAR_CY, 2, pal->text);
+
+    // Range labels
+    tft.setTextColor(pal->ring, pal->bg);
+    tft.setTextDatum(TC_DATUM);
+    for (int i = 1; i <= 3; i++) {
+        int r = RADAR_R * i / 3;
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%d", (int)(RANGES[range_idx] * i / 3));
+        tft.drawString(buf, RADAR_CX + 2, RADAR_CY - r + 2, 1);
+    }
 
     // Aircraft
     int new_blip_count = 0;
@@ -814,16 +840,6 @@ static void draw_radar() {
     }
     prev_blip_count = new_blip_count;
     prev_trail_count = new_trail_count;
-
-    // Range labels
-    tft.setTextColor(pal->ring, pal->bg);
-    tft.setTextDatum(TC_DATUM);
-    for (int i = 1; i <= 3; i++) {
-        int r = RADAR_R * i / 3;
-        char buf[8];
-        snprintf(buf, sizeof(buf), "%d", (int)(RANGES[range_idx] * i / 3));
-        tft.drawString(buf, RADAR_CX + 2, RADAR_CY - r + 2, 1);
-    }
 }
 
 // ---- Arrivals board ----
@@ -843,11 +859,11 @@ static void draw_arrivals() {
     int y = RADAR_Y + 2;
     tft.setTextColor(pal->hdr, pal->bg);
     tft.setTextDatum(TL_DATUM);
-    tft.drawString("CALL", 4, y, 2);
-    tft.drawString("ROUTE", 84, y, 2);
-    tft.drawString("ALT", 168, y, 2);
-    tft.drawString("SPD", 222, y, 2);
-    tft.drawString("DIST", 278, y, 2);
+    tft.drawString("Callsign", 4, y, 2);
+    tft.drawString("Route/Model", 84, y, 2);
+    tft.drawString("Alt", 168, y, 2);
+    tft.drawString("Speed", 222, y, 2);
+    tft.drawString("Dist", 278, y, 2);
 
     #if 0
     // Sort indicator
@@ -963,8 +979,8 @@ static void draw_arrivals() {
     tft.setTextDatum(MC_DATUM);
     snprintf(buf, sizeof(buf), "Sorted by %s", SORT_LABELS[arr_sort]);
     tft.drawString(buf, TOUCH_LEFT_MAX / 2, ARR_BTN_Y + ARR_BTN_H / 2, 2);
-    tft.drawString("TAP ROW", LCD_H_RES / 2, ARR_BTN_Y + ARR_BTN_H / 2, 1);
-    snprintf(buf, sizeof(buf), "Range %d", (int)RANGES[range_idx]);
+    tft.drawString("Tap row", LCD_H_RES / 2, ARR_BTN_Y + ARR_BTN_H / 2, 1);
+    snprintf(buf, sizeof(buf), "Range: %d", (int)RANGES[range_idx]);
     tft.drawString(buf, (TOUCH_RIGHT_MIN + LCD_H_RES) / 2, ARR_BTN_Y + ARR_BTN_H / 2, 2);
 }
 
@@ -1098,6 +1114,7 @@ static void draw_detail() {
     y += 28;
 
     int col1 = 4, col3 = 170;
+    const int offset = 30;
 
     auto label_val = [&](int lx, int vx, const char *label, const char *value) {
         tft.setTextColor(pal->hdr, pal->bg);
@@ -1107,65 +1124,71 @@ static void draw_detail() {
         tft.drawString(value, vx, y, 1);
     };
 
-    label_val(col1, col1 + 30, "HEX", a.icao_hex);
-    label_val(col3, col3 + 30, "REG", a.registration[0] ? a.registration : "---");
+    label_val(col1, col1 + offset, "HEX", a.icao_hex);
+    label_val(col3, col3 + offset, "REG", a.registration[0] ? a.registration : "---");
     y += 12;
-    label_val(col1, col1 + 30, "TYP", a.type_code[0] ? a.type_code : "---");
-    label_val(col3, col3 + 30, "CAT", a.category[0] ? a.category : "---");
+    label_val(col1, col1 + offset, "TYP", a.type_code[0] ? a.type_code : "---");
+    label_val(col3, col3 + offset, "CAT", a.category[0] ? a.category : "---");
     y += 12;
 
     tft.setTextColor(pal->hdr, pal->bg);
     tft.drawString("DESC", col1, y, 1);
     tft.setTextColor(pal->blip, pal->bg);
-    tft.drawString(a.desc[0] ? a.desc : "---", col1 + 36, y, 1);
+    tft.drawString(a.desc[0] ? a.desc : "---", col1 + offset, y, 1);
     y += 12;
 
     tft.setTextColor(pal->hdr, pal->bg);
     tft.drawString("OPR", col1, y, 1);
     tft.setTextColor(pal->blip, pal->bg);
-    tft.drawString(a.owner_op[0] ? a.owner_op : "---", col1 + 36, y, 1);
+    tft.drawString(a.owner_op[0] ? a.owner_op : "---", col1 + offset, y, 1);
     y += 12;
 
     snprintf(buf, sizeof(buf), "%s > %s",
         (a.origin[0] && a.origin[0] != '-') ? a.origin : "???",
         (a.dest[0] && a.dest[0] != '-') ? a.dest : "???");
-    label_val(col1, col1 + 36, "RTE", buf);
+    label_val(col1, col1 + offset, "RTE", buf);
     float dist = distance_nm(a.lat, a.lon);
     snprintf(buf, sizeof(buf), "%.0fnm", dist);
-    label_val(col3, col3 + 30, "DST", buf);
+    label_val(col3, col3 + offset, "DST", buf);
     y += 14;
 
     tft.drawLine(0, y, LCD_H_RES, y, pal->grid);
     y += 4;
 
     snprintf(buf, sizeof(buf), "%ld ft", a.altitude);
-    label_val(col1, col1 + 24, "AL", a.on_ground ? "GND" : buf);
+    label_val(col1, col1 + offset, "AL", a.on_ground ? "GND" : buf);
     snprintf(buf, sizeof(buf), "%d kt", a.speed);
-    label_val(col3, col3 + 24, "GS", buf);
+    label_val(col3, col3 + offset, "GS", buf);
     y += 12;
 
     snprintf(buf, sizeof(buf), "%d", a.heading);
-    label_val(col1, col1 + 24, "HEAD", buf);
+    label_val(col1, col1 + offset, "HEAD", buf);
     snprintf(buf, sizeof(buf), "%d fpm", a.vert_rate);
-    label_val(col3, col3 + 24, "VS", buf);
+    label_val(col3, col3 + offset, "VS", buf);
     y += 12;
 
     snprintf(buf, sizeof(buf), "%04d", a.squawk);
-    label_val(col1, col1 + 24, "SQAK", buf);
+    label_val(col1, col1 + offset, "SQAK", buf);
     if (a.mach > 0) snprintf(buf, sizeof(buf), "M%.2f", a.mach);
     else strlcpy(buf, "---", sizeof(buf));
-    label_val(col3, col3 + 24, "MACH", buf);
+    label_val(col3, col3 + offset, "MACH", buf);
     y += 12;
 
     snprintf(buf, sizeof(buf), "%d kt", a.ias);
-    label_val(col1, col1 + 30, "IAS", a.ias > 0 ? buf : "---");
+    label_val(col1, col1 + offset, "IAS", a.ias > 0 ? buf : "---");
     snprintf(buf, sizeof(buf), "%d kt", a.tas);
-    label_val(col3, col3 + 30, "TAS", a.tas > 0 ? buf : "---");
+    label_val(col3, col3 + offset, "TAS", a.tas > 0 ? buf : "---");
     y += 12;
 
-    tft.setTextColor(pal->grid, pal->bg);
-    tft.setTextDatum(MC_DATUM);
-    tft.drawString("< prev    tap: next    next >", LCD_H_RES / 2, RADAR_Y + RADAR_H - 8, 1);
+    tft.setTextColor(pal->hdr, pal->bg);
+    //tft.setTextDatum(MC_DATUM);
+    //tft.drawString("< prev    tap: next    next >", LCD_H_RES / 2, RADAR_Y + RADAR_H - 8, 1);
+
+    tft.setTextDatum(BL_DATUM);
+    tft.drawString("Previous", 0, LCD_V_RES, 1);
+
+    tft.setTextDatum(BR_DATUM);
+    tft.drawString("Next", LCD_H_RES, LCD_V_RES, 1);
 }
 
 // ---- Flight log view ----
@@ -1631,7 +1654,7 @@ void loop() {
     auto_cycle();
 
     // Redraw at ~15fps
-    if (now - last_draw >= /*66*/1000) {
+    if (now - last_draw >= (current_view == VIEW_LOADING ? 66 : 1000)) {
         last_draw = now;
 
         if (current_view == VIEW_LOADING) {

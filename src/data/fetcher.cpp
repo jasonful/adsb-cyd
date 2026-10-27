@@ -10,6 +10,8 @@
 #include <ArduinoJson.h>
 #include <esp_heap_caps.h>
 
+#define SERIAL_PRINT 1
+
 static volatile NetType _active_net = NET_NONE;
 
 static AircraftList *_aircraft_list = nullptr;
@@ -125,7 +127,9 @@ static void apply_parsed(Aircraft &a, const ParsedEntry &p, bool is_new) {
 
 static void parse_aircraft_json(JsonDocument &doc) {
     JsonArray ac = doc["ac"].as<JsonArray>();
+    #if SERIAL_PRINT
     Serial.printf("parse: ac array size=%d\n", ac.size());
+    #endif
 
     static ParsedEntry parsed[MAX_AIRCRAFT];
     int parsed_count = 0;
@@ -216,15 +220,21 @@ static void update_ip_addr() {
 
 static void fetch_task(void *param) {
     // Wait for WiFi with retry and radio recycle
+    #if SERIAL_PRINT
     Serial.print("Fetcher: waiting for WiFi");
+    #endif
     int wait_cycles = 0;
     while (!network_connected()) {
         vTaskDelay(pdMS_TO_TICKS(500));
+        #if SERIAL_PRINT
         Serial.print(".");
+        #endif
         wait_cycles++;
         // After 20s (40 cycles), recycle radio and retry
         if (wait_cycles % 40 == 0) {
+            #if SERIAL_PRINT
             Serial.printf("\nWiFi retry — recycling radio (attempt %d)\n", wait_cycles / 40 + 1);
+            #endif
             WiFi.disconnect(false);
             WiFi.mode(WIFI_OFF);
             vTaskDelay(pdMS_TO_TICKS(500));
@@ -233,13 +243,16 @@ static void fetch_task(void *param) {
         }
     }
     update_ip_addr();
+    #if SERIAL_PRINT
     Serial.printf("\nWiFi connected, IP: %s\n", _fstats.ip_addr);
+    #endif
 
     char url[128];
     snprintf(url, sizeof(url), "https://api.adsb.lol/v2/point/%.4f/%.4f/%d",
              HOME_LAT, HOME_LON, ADSB_RADIUS_NM);
+    #if SERIAL_PRINT
     Serial.printf("ADS-B API URL: %s\n", url);
-
+    #endif
     while (true) {
         if (network_connected()) {
             if (http_mutex_acquire(pdMS_TO_TICKS(15000))) {
@@ -253,9 +266,11 @@ static void fetch_task(void *param) {
                 http.setUserAgent(user_agent());
                 uint32_t t0 = millis();
                 int httpCode = http.GET();
+                #if SERIAL_PRINT
                 Serial.printf("Fetch: HTTP %d, %lums, heap=%lu\n",
                     httpCode, (unsigned long)(millis() - t0),
                     (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+                #endif
 
                 if (httpCode == HTTP_CODE_OK) {
                     _fstats.last_fetch_ms = millis() - t0;
@@ -265,9 +280,11 @@ static void fetch_task(void *param) {
                     size_t buf_size = (content_len > 0) ? (size_t)content_len + 1 : 64 * 1024;
                     char *buf = (char *)malloc(buf_size);
                     size_t total = 0;
+                    #if SERIAL_PRINT
                     Serial.printf("Body: content_len=%d, buf=%s, largest_block=%lu\n",
                         content_len, buf ? "ok" : "MALLOC FAILED",
                         (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+                    #endif
 
                     if (buf) {
                         size_t target = (content_len > 0) ? (size_t)content_len : buf_size - 1;
@@ -320,17 +337,25 @@ static void fetch_task(void *param) {
 
                     if (!err) {
                         _fstats.fetch_ok++;
+                        #if SERIAL_PRINT
                         Serial.printf("JSON OK, ac array ptr=%p, heap=%lu\n",
                             (void*)_aircraft_list->aircraft,
                             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+                        #endif
+
                         parse_aircraft_json(doc);
+
+                        #if SERIAL_PRINT
                         Serial.printf("Fetched %d ac, heap=%lu\n",
                             _aircraft_list->count,
                             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+                        #endif
                     } else {
                         _fstats.fetch_fail++;
                         error_log_add("JSON: %s", err.c_str());
+                        #if SERIAL_PRINT
                         Serial.printf("JSON error: %s\n", err.c_str());
+                        #endif
                     }
                 } else {
                     _fstats.fetch_fail++;
@@ -417,7 +442,9 @@ static void route_enrich_task(void *param) {
                 else strlcpy(a.origin, "-", sizeof(a.origin));
                 if (dest[0]) strlcpy(a.dest, dest, sizeof(a.dest));
                 else strlcpy(a.dest, "-", sizeof(a.dest));
+                #if SERIAL_PRINT
                 Serial.printf("Route: %s %s->%s\n", callsign, a.origin, a.dest);
+                #endif
             }
             _aircraft_list->unlock();
         }
@@ -434,7 +461,9 @@ void fetcher_init(AircraftList *list) {
     WiFi.setAutoReconnect(true);
 
     // Start WiFi non-blocking — fetch_task handles retry/wait
+    #if SERIAL_PRINT
     Serial.printf("WiFi SSID: [%s]\n", g_config.wifi_ssid);
+    #endif
     WiFi.mode(WIFI_STA);
     WiFi.begin(g_config.wifi_ssid, g_config.wifi_pass);
 
