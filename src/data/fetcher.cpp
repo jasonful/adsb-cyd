@@ -128,7 +128,7 @@ static void apply_parsed(Aircraft &a, const ParsedEntry &p, bool is_new) {
 static void parse_aircraft_json(JsonDocument &doc) {
     JsonArray ac = doc["ac"].as<JsonArray>();
     #if SERIAL_PRINT
-    Serial.printf("parse: ac array size=%d\n", ac.size());
+    Serial.printf("parse: ac arraysize=%d\n", ac.size());
     #endif
 
     static ParsedEntry parsed[MAX_AIRCRAFT];
@@ -156,7 +156,9 @@ static void parse_aircraft_json(JsonDocument &doc) {
         p.speed = (int16_t)(obj["gs"] | 0.0f);
         p.heading = (int16_t)(obj["track"] | 0.0f);
         p.vert_rate = (int16_t)(obj["baro_rate"] | 0.0f);
-        p.squawk = strtoul(obj["squawk"] | "0", nullptr, 10);
+        p.squawk = obj["squawk"].is<int>() 
+           ? (uint16_t)obj["squawk"].as<int>() 
+           : (uint16_t)strtoul(obj["squawk"] | "0", nullptr, 10);        
         p.on_ground = obj["alt_baro"] == "ground";
         p.mach = obj["mach"] | 0.0f;
         p.ias = (int16_t)(obj["ias"] | 0.0f);
@@ -248,7 +250,9 @@ static void fetch_task(void *param) {
     #endif
 
     char url[128];
-    snprintf(url, sizeof(url), "https://api.adsb.lol/v2/point/%.4f/%.4f/%d",
+    snprintf(url, sizeof(url),
+             //"https://api.adsb.lol/v2/point/%.4f/%.4f/%d",
+             "https://opendata.adsb.fi/api/v3/lat/%.4f/lon/%.4f/dist/%d",
              HOME_LAT, HOME_LON, ADSB_RADIUS_NM);
     #if SERIAL_PRINT
     Serial.printf("ADS-B API URL: %s\n", url);
@@ -267,45 +271,25 @@ static void fetch_task(void *param) {
                 uint32_t t0 = millis();
                 int httpCode = http.GET();
                 #if SERIAL_PRINT
-                Serial.printf("Fetch: HTTP %d, %lums, heap=%lu\n",
+                Serial.printf("Fetch: HTTP %d, %lums, freeheap=%lu\n",
                     httpCode, (unsigned long)(millis() - t0),
                     (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
                 #endif
 
-                if (httpCode == HTTP_CODE_OK) {
+if (httpCode == HTTP_CODE_OK) {
                     _fstats.last_fetch_ms = millis() - t0;
 
-                    // Read full response with deadline loop (fixes truncated JSON)
-                    int content_len = http.getSize();
-                    size_t buf_size = (content_len > 0) ? (size_t)content_len + 1 : 64 * 1024;
-                    char *buf = (char *)malloc(buf_size);
-                    size_t total = 0;
+                    // 1. Let HTTPClient handle chunked transfer decoding and buffer management
+                    String payload = http.getString();
+                    _fstats.bytes_received += payload.length();
+
                     #if SERIAL_PRINT
-                    Serial.printf("Body: content_len=%d, buf=%s, largest_block=%lu\n",
-                        content_len, buf ? "ok" : "MALLOC FAILED",
-                        (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+                    Serial.printf("Body: received %u bytes, heap=%lu\n",
+                        (unsigned int)payload.length(),
+                        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
                     #endif
 
-                    if (buf) {
-                        size_t target = (content_len > 0) ? (size_t)content_len : buf_size - 1;
-                        WiFiClient *stream = http.getStreamPtr();
-                        uint32_t deadline = millis() + 15000;
-                        while (total < target && millis() < deadline) {
-                            int avail = stream->available();
-                            if (avail > 0) {
-                                int to_read = min((size_t)avail, target - total);
-                                total += stream->readBytes(buf + total, to_read);
-                            } else if (!stream->connected()) {
-                                break;
-                            } else {
-                                vTaskDelay(1);
-                            }
-                        }
-                        buf[total] = '\0';
-                    }
-                    _fstats.bytes_received += total;
-
-                    // Parse with filter — only extract fields we need
+                    // 2. Define filter — only extract fields we need
                     JsonDocument filter;
                     JsonObject af = filter["ac"][0].to<JsonObject>();
                     af["hex"] = true;
@@ -329,16 +313,16 @@ static void fetch_task(void *param) {
                     af["roll"] = true;
                     af["nav_qnh"] = true;
 
+                    // 3. Deserialize JSON directly from the payload string
                     JsonDocument doc;
-                    DeserializationError err = (buf && total > 0)
-                        ? deserializeJson(doc, buf, total, DeserializationOption::Filter(filter))
+                    DeserializationError err = (payload.length() > 0)
+                        ? deserializeJson(doc, payload, DeserializationOption::Filter(filter))
                         : DeserializationError::EmptyInput;
-                    if (buf) free(buf);
 
                     if (!err) {
                         _fstats.fetch_ok++;
                         #if SERIAL_PRINT
-                        Serial.printf("JSON OK, ac array ptr=%p, heap=%lu\n",
+                        Serial.printf("JSON OK, ac arrayptr=%p, heap=%lu\n",
                             (void*)_aircraft_list->aircraft,
                             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
                         #endif
@@ -417,9 +401,9 @@ static void route_enrich_task(void *param) {
             int code = http.GET();
 
             if (code == HTTP_CODE_OK) {
-                WiFiClient *stream = http.getStreamPtr();
+                String payload = http.getString();
                 JsonDocument doc;
-                if (!deserializeJson(doc, *stream)) {
+                if (!deserializeJson(doc, payload)) {
                     JsonObject route = doc["response"]["flightroute"];
                     strlcpy(origin, route["origin"]["iata_code"] | "", sizeof(origin));
                     strlcpy(dest, route["destination"]["iata_code"] | "", sizeof(dest));
