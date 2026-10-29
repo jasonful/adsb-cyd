@@ -18,6 +18,8 @@
 #include "data/enrichment.h"
 #include "ui/filters.h"
 
+#define SERIAL_PRINT 0
+
 // Touch on separate VSPI bus
 #define XPT2046_IRQ   36
 #define XPT2046_MOSI  32
@@ -59,8 +61,8 @@ struct ColorPalette {
 
 static const ColorPalette PALETTE_GREEN = {
     TFT_BLACK,           // bg
-    c565(0, 40, 0),      // grid
-    c565(0, 60, 0),      // ring
+    c565(0, 150, 0),//c565(0, 40, 0),      // grid
+    c565(0, 150, 0),//c565(0, 60, 0),      // ring
     c565(0, 120, 0),     // sweep
     c565(0, 200, 0),     // text
     c565(0, 80, 0),      // trail
@@ -1523,7 +1525,9 @@ static void auto_cycle() {
 
 void setup() {
     Serial.begin(115200);
+    #if SERIAL_PRINT
     Serial.println("ADS-B CYD Radar starting...");
+    #endif
 
     // Backlight via PWM
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
@@ -1559,10 +1563,12 @@ void setup() {
     last_touch_time = now;
     last_cycle_time = now;
 
+    #if SERIAL_PRINT
     Serial.printf("Aircraft array: %d x %d = %d bytes\n",
         MAX_AIRCRAFT, (int)sizeof(Aircraft), MAX_AIRCRAFT * (int)sizeof(Aircraft));
     Serial.printf("Free heap: %lu\n",
         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    #endif
 }
 
 // ---- Touch zone overlay (shown for a few seconds after boot) ----
@@ -1654,7 +1660,7 @@ void loop() {
     auto_cycle();
 
     // Redraw at ~15fps
-    if (now - last_draw >= (current_view == VIEW_LOADING ? 66 : 1000)) {
+    if (now - last_draw >= (current_view == VIEW_LOADING ? 66 : 3000)) {
         last_draw = now;
 
         if (current_view == VIEW_LOADING) {
